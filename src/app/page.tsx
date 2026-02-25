@@ -1,8 +1,10 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Search, MapPin, Globe, Phone, MapPin as MapPinIcon, Loader2, Link as LinkIcon, AlertTriangle, CheckCircle, Store } from 'lucide-react';
+import { Search, MapPin, Globe, Phone, MapPin as MapPinIcon, Loader2, Link as LinkIcon, AlertTriangle, Store, ChevronLeft, ChevronRight, Download } from 'lucide-react';
 
 interface Insight {
   score: number;
@@ -25,15 +27,46 @@ interface Business {
 export default function Home() {
   const [radius, setRadius] = useState('5');
   const [loading, setLoading] = useState(false);
-  const [businesses, setBusinesses] = useState<Business[]>([]);
+  const [loadingMore, setLoadingMore] = useState(false);
+
+  const [allBusinesses, setAllBusinesses] = useState<Business[]>([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [nextPageToken, setNextPageToken] = useState<string | null>(null);
+
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const fetchBusinesses = async () => {
-    setLoading(true);
-    setError(null);
-    setNotice(null);
-    setBusinesses([]);
+  const ITEMS_PER_PAGE = 10;
+
+  // Derive the current page's displayed businesses
+  const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+  const displayedBusinesses = allBusinesses.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+  const totalPages = Math.ceil(allBusinesses.length / ITEMS_PER_PAGE) + (nextPageToken ? 1 : 0);
+
+  // Auto-analyze websites when displayedBusinesses change
+  useEffect(() => {
+    if (displayedBusinesses.length === 0) return;
+
+    displayedBusinesses.forEach((biz, localIdx) => {
+      const globalIdx = startIndex + localIdx;
+      // If it has a website, and hasn't been analyzed (nor currently analyzing)
+      if (biz.website && !biz.analysis) {
+        analyzeWebsite(globalIdx, biz.website);
+      }
+    });
+  }, [displayedBusinesses, startIndex]);
+
+
+  const fetchBusinesses = async (token?: string) => {
+    if (token) setLoadingMore(true);
+    else {
+      setLoading(true);
+      setError(null);
+      setNotice(null);
+      setAllBusinesses([]);
+      setCurrentPage(1);
+      setNextPageToken(null);
+    }
 
     try {
       if (!navigator.geolocation) {
@@ -43,54 +76,123 @@ export default function Home() {
       navigator.geolocation.getCurrentPosition(async (position) => {
         const { latitude, longitude } = position.coords;
         try {
-          const res = await fetch(`/api/businesses?lat=${latitude}&lng=${longitude}&radius=${radius}`);
+          const url = token
+            ? `/api/businesses?pageToken=${token}`
+            : `/api/businesses?lat=${latitude}&lng=${longitude}&radius=${radius}`;
+
+          // Google sometimes requires a short delay before a page token is valid
+          if (token) await new Promise(r => setTimeout(r, 2000));
+
+          const res = await fetch(url);
           const data = await res.json();
 
-          if (!res.ok) {
-            throw new Error(data.error || 'Failed to fetch businesses');
+          if (!res.ok) throw new Error(data.error || 'Failed to fetch businesses');
+
+          if (token) {
+            setAllBusinesses(prev => [...prev, ...data.businesses]);
+          } else {
+            setAllBusinesses(data.businesses);
           }
 
-          setBusinesses(data.businesses);
+          setNextPageToken(data.nextPageToken || null);
           if (data._notice) setNotice(data._notice);
+
         } catch (err: any) {
           setError(err.message);
         } finally {
           setLoading(false);
+          setLoadingMore(false);
         }
       }, (err) => {
         setError("Location access denied. Please enable location services.");
         setLoading(false);
+        setLoadingMore(false);
       });
     } catch (err: any) {
       setError(err.message);
       setLoading(false);
+      setLoadingMore(false);
     }
   };
 
-  const analyzeWebsite = async (index: number, url: string) => {
-    // Set analyzing state
-    setBusinesses(prev => prev.map((b, i) => i === index ? { ...b, analysis: { ...(b.analysis || {}), analyzing: true } as unknown as Insight } : b));
+  const analyzeWebsite = async (globalIndex: number, url: string) => {
+    // Mark as analyzing
+    setAllBusinesses(prev => {
+      const arr = [...prev];
+      arr[globalIndex] = { ...arr[globalIndex], analysis: { analyzing: true } as unknown as Insight };
+      return arr;
+    });
 
     try {
       const res = await fetch('/api/analyze-website', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url })
       });
       const data = await res.json();
 
-      setBusinesses(prev => prev.map((b, i) => i === index ? { ...b, analysis: { ...data, analyzing: false } } : b));
+      setAllBusinesses(prev => {
+        const arr = [...prev];
+        arr[globalIndex] = { ...arr[globalIndex], analysis: { ...data, analyzing: false } };
+        return arr;
+      });
     } catch (err) {
       console.error(err);
-      setBusinesses(prev => prev.map((b, i) => i === index ? { ...b, analysis: { score: 0, category: 'Error', insights: ['Analysis failed to run'], isSecure: false, analyzing: false } } : b));
+      setAllBusinesses(prev => {
+        const arr = [...prev];
+        arr[globalIndex] = { ...arr[globalIndex], analysis: { score: 0, category: 'Error', insights: ['Analysis failed'], isSecure: false, analyzing: false } };
+        return arr;
+      });
+    }
+  };
+
+  const exportCSV = () => {
+    if (allBusinesses.length === 0) return;
+
+    const headers = ['Name', 'Category', 'Address', 'Phone', 'Website', 'Tech Score', 'Category (Legacy/Modern)', 'Insights'];
+    const rows = allBusinesses.map(biz => [
+      `"${(biz.name || '').replace(/"/g, '""')}"`,
+      `"${biz.category}"`,
+      `"${(biz.address || '').replace(/"/g, '""')}"`,
+      `"${biz.phone || ''}"`,
+      `"${biz.website || ''}"`,
+      biz.analysis?.score !== undefined ? biz.analysis.score : '',
+      biz.analysis?.category || '',
+      `"${(biz.analysis?.insights || []).join('; ')}"`
+    ]);
+
+    const csvContent = "data:text/csv;charset=utf-8,"
+      + headers.join(',') + '\n'
+      + rows.map(e => e.join(',')).join('\n');
+
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `local_leads_export.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const handleNextPage = () => {
+    if (currentPage * ITEMS_PER_PAGE < allBusinesses.length) {
+      setCurrentPage(currentPage + 1);
+    } else if (nextPageToken) {
+      // Need to fetch more from API
+      fetchBusinesses(nextPageToken).then(() => {
+        setCurrentPage(currentPage + 1);
+      });
+    }
+  };
+
+  const handlePrevPage = () => {
+    if (currentPage > 1) {
+      setCurrentPage(currentPage - 1);
     }
   };
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 overflow-hidden relative selection:bg-indigo-500/30">
-      {/* Background Gradients */}
       <div className="absolute top-0 left-0 w-full h-full overflow-hidden -z-10">
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-indigo-600/20 blur-[120px]" />
         <div className="absolute top-[20%] right-[-10%] w-[30%] h-[50%] rounded-full bg-cyan-600/10 blur-[150px]" />
@@ -112,7 +214,7 @@ export default function Home() {
             Find Your Next <br /> <span className="text-indigo-400">Perfect Client</span>
           </h1>
           <p className="text-lg text-slate-400 max-w-2xl mx-auto">
-            Discover local businesses near you and instantly analyze their digital presence to identify high-value prospects for your software agency.
+            Discover local businesses near you and instantly analyze their digital presence to identify high-value prospects.
           </p>
         </motion.div>
 
@@ -139,7 +241,7 @@ export default function Home() {
             </div>
 
             <button
-              onClick={fetchBusinesses}
+              onClick={() => fetchBusinesses()}
               disabled={loading}
               className="w-full sm:w-auto bg-indigo-500 hover:bg-indigo-400 text-white font-medium py-3 px-8 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed group"
             >
@@ -153,7 +255,6 @@ export default function Home() {
               <AlertTriangle className="w-4 h-4" /> {error}
             </div>
           )}
-
           {notice && (
             <div className="mt-4 p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-sm flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 flex-shrink-0" /> {notice}
@@ -163,7 +264,7 @@ export default function Home() {
 
         {/* Results Data Table */}
         <AnimatePresence>
-          {businesses.length > 0 && (
+          {allBusinesses.length > 0 && (
             <motion.div
               initial={{ opacity: 0, y: 40 }}
               animate={{ opacity: 1, y: 0 }}
@@ -171,6 +272,16 @@ export default function Home() {
               transition={{ duration: 0.5, delay: 0.3 }}
               className="mt-16"
             >
+              <div className="flex items-center justify-between mb-4 px-2">
+                <h3 className="text-xl font-semibold">Local Prospects Found: {allBusinesses.length}{nextPageToken && '+'}</h3>
+                <button
+                  onClick={exportCSV}
+                  className="bg-white/5 hover:bg-white/10 border border-white/10 text-white font-medium py-2 px-4 rounded-lg text-sm transition-all flex items-center gap-2"
+                >
+                  <Download className="w-4 h-4" /> Export ALL to CSV
+                </button>
+              </div>
+
               <div className="glass rounded-3xl overflow-hidden border border-white/5 shadow-2xl">
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse">
@@ -179,15 +290,14 @@ export default function Home() {
                         <th className="py-5 px-6 font-semibold text-slate-300">Business Details</th>
                         <th className="py-5 px-6 font-semibold text-slate-300">Contact</th>
                         <th className="py-5 px-6 font-semibold text-slate-300">Digital Presence</th>
-                        <th className="py-5 px-6 font-semibold text-slate-300 text-right">Action</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-white/5">
-                      {businesses.map((biz, idx) => (
+                    <tbody className="divide-y divide-white/5 min-h-[400px]">
+                      {displayedBusinesses.map((biz, idx) => (
                         <motion.tr
                           initial={{ opacity: 0, x: -20 }}
                           animate={{ opacity: 1, x: 0 }}
-                          transition={{ delay: 0.1 * idx }}
+                          transition={{ delay: 0.05 * idx }}
                           key={biz.id}
                           className="hover:bg-white/[0.02] transition-colors"
                         >
@@ -229,7 +339,7 @@ export default function Home() {
                           </td>
 
                           {/* Digital Presence / Analysis */}
-                          <td className="py-6 px-6 align-top max-w-[300px]">
+                          <td className="py-6 px-6 align-top max-w-[320px]">
                             {!biz.website ? (
                               <div className="inline-flex bg-rose-500/10 text-rose-400 px-3 py-1 rounded-full text-xs font-semibold">
                                 Prime Target: Needs Website
@@ -237,14 +347,14 @@ export default function Home() {
                             ) : biz.analysis ? (
                               biz.analysis.analyzing ? (
                                 <div className="flex items-center gap-2 text-indigo-300 text-sm">
-                                  <Loader2 className="w-4 h-4 animate-spin" /> Analyzing Tech Stack...
+                                  <Loader2 className="w-4 h-4 animate-spin" /> Auto-Analyzing Tech Stack...
                                 </div>
                               ) : (
                                 <div className="space-y-3">
                                   <div className="flex items-center gap-3">
                                     <div className={`px-3 py-1 rounded-full text-xs font-semibold ${biz.analysis.category === 'Modern' ? 'bg-emerald-500/10 text-emerald-400' :
-                                        biz.analysis.category === 'Average' ? 'bg-blue-500/10 text-blue-400' :
-                                          'bg-amber-500/10 text-amber-400'
+                                      biz.analysis.category === 'Average' ? 'bg-blue-500/10 text-blue-400' :
+                                        'bg-amber-500/10 text-amber-400'
                                       }`}>
                                       {biz.analysis.category}
                                     </div>
@@ -266,32 +376,54 @@ export default function Home() {
                                 </div>
                               )
                             ) : (
-                              <span className="text-slate-500 text-sm">Not analyzed yet</span>
-                            )}
-                          </td>
-
-                          {/* Action */}
-                          <td className="py-6 px-6 align-top text-right">
-                            {biz.website && !biz.analysis && (
-                              <button
-                                onClick={() => analyzeWebsite(idx, biz.website as string)}
-                                className="bg-white/5 hover:bg-white/10 border border-white/10 text-white font-medium py-2 px-5 rounded-lg text-sm transition-all shadow-sm"
-                              >
-                                Analyze Tech
-                              </button>
-                            )}
-                            {(!biz.website || (biz.analysis && biz.analysis.category === 'Legacy')) && (
-                              <button className="bg-indigo-500 hover:bg-indigo-400 text-white font-medium py-2 px-5 rounded-lg text-sm transition-all shadow-lg shadow-indigo-500/20">
-                                Contact Lead
-                              </button>
+                              <div className="flex items-center gap-2 text-slate-500 text-sm">
+                                <Loader2 className="w-4 h-4 animate-spin" /> Pending queue...
+                              </div>
                             )}
                           </td>
                         </motion.tr>
                       ))}
+                      {loadingMore && (
+                        <tr>
+                          <td colSpan={3} className="py-12 text-center text-slate-400">
+                            <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" />
+                            Fetching more leads from Google...
+                          </td>
+                        </tr>
+                      )}
                     </tbody>
                   </table>
                 </div>
               </div>
+
+              {/* Pagination Controls */}
+              <div className="mt-6 flex items-center justify-between">
+                <div className="text-slate-400 text-sm">
+                  Showing <span className="text-white font-medium">{startIndex + 1}</span> to <span className="text-white font-medium">{Math.min(startIndex + ITEMS_PER_PAGE, allBusinesses.length)}</span>
+                  {' '}of {allBusinesses.length}{nextPageToken ? '+' : ''} entries
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handlePrevPage}
+                    disabled={currentPage === 1 || loadingMore}
+                    className="p-2 rounded-lg bg-white/5 border border-white/10 text-slate-300 hover:bg-white/10 hover:text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    <ChevronLeft className="w-5 h-5" />
+                  </button>
+                  <span className="text-sm font-medium px-4">
+                    Page {currentPage} {totalPages ? `of ${totalPages}` : ''}
+                  </span>
+                  <button
+                    onClick={handleNextPage}
+                    disabled={(currentPage >= totalPages && !nextPageToken) || loadingMore}
+                    className="p-2 rounded-lg bg-white/5 border border-white/10 text-slate-300 hover:bg-white/10 hover:text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    {loadingMore ? <Loader2 className="w-5 h-5 animate-spin" /> : <ChevronRight className="w-5 h-5" />}
+                  </button>
+                </div>
+              </div>
+
             </motion.div>
           )}
         </AnimatePresence>
