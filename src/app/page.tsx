@@ -81,13 +81,28 @@ export default function Home() {
 
   useEffect(() => {
     if (displayedBusinesses.length === 0) return;
+
+    // We must NOT include `displayedBusinesses` as a dependency array raw, 
+    // or else analyzeWebsite mutating `allBusinesses` will trigger an infinite loop.
+    // We only want this to run when the `startIndex` or base page changes.
+    let needsAnalysis = false;
+
     displayedBusinesses.forEach((biz, localIdx) => {
-      const globalIdx = startIndex + localIdx;
       if (biz.website && !biz.analysis) {
-        analyzeWebsite(globalIdx, biz.website);
+        needsAnalysis = true;
       }
     });
-  }, [displayedBusinesses, startIndex]);
+
+    if (needsAnalysis) {
+      displayedBusinesses.forEach((biz, localIdx) => {
+        const globalIdx = startIndex + localIdx;
+        if (biz.website && !biz.analysis) {
+          analyzeWebsite(globalIdx, biz.website);
+        }
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startIndex, allBusinesses.length]);
 
 
   const fetchBusinesses = async (token?: string) => {
@@ -201,24 +216,30 @@ export default function Home() {
     }
   };
 
-  // Map Handlers
+  // Map Handlers - Debounced and guarded to prevent infinite loops
   const onRadiusChanged = useCallback(() => {
     if (circleRef.current) {
-      setRadiusMeters(circleRef.current.getRadius());
+      const newRadius = circleRef.current.getRadius();
+      // Only update state if it changed significantly to avoid floating point loops
+      if (Math.abs(newRadius - radiusMeters) > 5) {
+        setRadiusMeters(newRadius);
+      }
     }
-  }, []);
+  }, [radiusMeters]);
 
   const onCenterChanged = useCallback(() => {
     if (circleRef.current) {
       const newCenter = circleRef.current.getCenter();
       if (newCenter) {
-        setMapCenter({
-          lat: newCenter.lat(),
-          lng: newCenter.lng()
-        });
+        const lat = newCenter.lat();
+        const lng = newCenter.lng();
+        // Prevent microscopic sub-pixel drags from triggering mass re-renders
+        if (Math.abs(lat - mapCenter.lat) > 0.0001 || Math.abs(lng - mapCenter.lng) > 0.0001) {
+          setMapCenter({ lat, lng });
+        }
       }
     }
-  }, []);
+  }, [mapCenter]);
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 overflow-hidden relative selection:bg-indigo-500/30 pb-24">
@@ -464,8 +485,8 @@ export default function Home() {
                                 <div className="space-y-3">
                                   <div className="flex items-center gap-3">
                                     <div className={`px-3 py-1 rounded-full text-xs font-semibold ${biz.analysis.category === 'Modern' ? 'bg-emerald-500/10 text-emerald-400' :
-                                        biz.analysis.category === 'Average' ? 'bg-blue-500/10 text-blue-400' :
-                                          'bg-amber-500/10 text-amber-400'
+                                      biz.analysis.category === 'Average' ? 'bg-blue-500/10 text-blue-400' :
+                                        'bg-amber-500/10 text-amber-400'
                                       }`}>
                                       {biz.analysis.category}
                                     </div>
