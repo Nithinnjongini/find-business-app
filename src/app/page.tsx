@@ -2,9 +2,10 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Search, MapPin, Globe, Phone, MapPin as MapPinIcon, Loader2, Link as LinkIcon, AlertTriangle, Store, ChevronLeft, ChevronRight, Download } from 'lucide-react';
+import { GoogleMap, useJsApiLoader, Circle, Marker } from '@react-google-maps/api';
 
 interface Insight {
   score: number;
@@ -24,8 +25,27 @@ interface Business {
   analysis?: Insight;
 }
 
+const mapContainerStyle = {
+  width: '100%',
+  height: '100%',
+  borderRadius: '16px'
+};
+
+const defaultCenter = {
+  lat: 37.7749, // SF Default
+  lng: -122.4194
+};
+
 export default function Home() {
-  const [radius, setRadius] = useState('5');
+  const { isLoaded } = useJsApiLoader({
+    id: 'google-map-script',
+    googleMapsApiKey: process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || ''
+  });
+
+  const [mapCenter, setMapCenter] = useState(defaultCenter);
+  const [radiusMeters, setRadiusMeters] = useState(8046); // ~5 miles in meters
+  const circleRef = useRef<any>(null);
+
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
 
@@ -38,18 +58,31 @@ export default function Home() {
 
   const ITEMS_PER_PAGE = 10;
 
-  // Derive the current page's displayed businesses
   const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
   const displayedBusinesses = allBusinesses.slice(startIndex, startIndex + ITEMS_PER_PAGE);
   const totalPages = Math.ceil(allBusinesses.length / ITEMS_PER_PAGE) + (nextPageToken ? 1 : 0);
 
-  // Auto-analyze websites when displayedBusinesses change
+  // Initialize Map Center from Browser Geolocation
+  useEffect(() => {
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setMapCenter({
+            lat: position.coords.latitude,
+            lng: position.coords.longitude
+          });
+        },
+        () => {
+          console.warn("Location access denied or unavailable.");
+        }
+      );
+    }
+  }, []);
+
   useEffect(() => {
     if (displayedBusinesses.length === 0) return;
-
     displayedBusinesses.forEach((biz, localIdx) => {
       const globalIdx = startIndex + localIdx;
-      // If it has a website, and hasn't been analyzed (nor currently analyzing)
       if (biz.website && !biz.analysis) {
         analyzeWebsite(globalIdx, biz.website);
       }
@@ -69,54 +102,37 @@ export default function Home() {
     }
 
     try {
-      if (!navigator.geolocation) {
-        throw new Error('Geolocation is not supported by your browser');
+      // Use mapCenter from the Google map instead of browser geolocation
+      const radiusMiles = radiusMeters / 1609.34;
+      const url = token
+        ? `/api/businesses?pageToken=${token}`
+        : `/api/businesses?lat=${mapCenter.lat}&lng=${mapCenter.lng}&radius=${radiusMiles}`;
+
+      if (token) await new Promise(r => setTimeout(r, 2000));
+
+      const res = await fetch(url);
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error || 'Failed to fetch businesses');
+
+      if (token) {
+        setAllBusinesses(prev => [...prev, ...data.businesses]);
+      } else {
+        setAllBusinesses(data.businesses);
       }
 
-      navigator.geolocation.getCurrentPosition(async (position) => {
-        const { latitude, longitude } = position.coords;
-        try {
-          const url = token
-            ? `/api/businesses?pageToken=${token}`
-            : `/api/businesses?lat=${latitude}&lng=${longitude}&radius=${radius}`;
+      setNextPageToken(data.nextPageToken || null);
+      if (data._notice) setNotice(data._notice);
 
-          // Google sometimes requires a short delay before a page token is valid
-          if (token) await new Promise(r => setTimeout(r, 2000));
-
-          const res = await fetch(url);
-          const data = await res.json();
-
-          if (!res.ok) throw new Error(data.error || 'Failed to fetch businesses');
-
-          if (token) {
-            setAllBusinesses(prev => [...prev, ...data.businesses]);
-          } else {
-            setAllBusinesses(data.businesses);
-          }
-
-          setNextPageToken(data.nextPageToken || null);
-          if (data._notice) setNotice(data._notice);
-
-        } catch (err: any) {
-          setError(err.message);
-        } finally {
-          setLoading(false);
-          setLoadingMore(false);
-        }
-      }, (err) => {
-        setError("Location access denied. Please enable location services.");
-        setLoading(false);
-        setLoadingMore(false);
-      });
     } catch (err: any) {
       setError(err.message);
+    } finally {
       setLoading(false);
       setLoadingMore(false);
     }
   };
 
   const analyzeWebsite = async (globalIndex: number, url: string) => {
-    // Mark as analyzing
     setAllBusinesses(prev => {
       const arr = [...prev];
       arr[globalIndex] = { ...arr[globalIndex], analysis: { analyzing: true } as unknown as Insight };
@@ -137,7 +153,6 @@ export default function Home() {
         return arr;
       });
     } catch (err) {
-      console.error(err);
       setAllBusinesses(prev => {
         const arr = [...prev];
         arr[globalIndex] = { ...arr[globalIndex], analysis: { score: 0, category: 'Error', insights: ['Analysis failed'], isSecure: false, analyzing: false } };
@@ -148,7 +163,6 @@ export default function Home() {
 
   const exportCSV = () => {
     if (allBusinesses.length === 0) return;
-
     const headers = ['Name', 'Category', 'Address', 'Phone', 'Website', 'Tech Score', 'Category (Legacy/Modern)', 'Insights'];
     const rows = allBusinesses.map(biz => [
       `"${(biz.name || '').replace(/"/g, '""')}"`,
@@ -161,10 +175,7 @@ export default function Home() {
       `"${(biz.analysis?.insights || []).join('; ')}"`
     ]);
 
-    const csvContent = "data:text/csv;charset=utf-8,"
-      + headers.join(',') + '\n'
-      + rows.map(e => e.join(',')).join('\n');
-
+    const csvContent = "data:text/csv;charset=utf-8," + headers.join(',') + '\n' + rows.map(e => e.join(',')).join('\n');
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
@@ -178,7 +189,6 @@ export default function Home() {
     if (currentPage * ITEMS_PER_PAGE < allBusinesses.length) {
       setCurrentPage(currentPage + 1);
     } else if (nextPageToken) {
-      // Need to fetch more from API
       fetchBusinesses(nextPageToken).then(() => {
         setCurrentPage(currentPage + 1);
       });
@@ -191,68 +201,170 @@ export default function Home() {
     }
   };
 
+  // Map Handlers
+  const onRadiusChanged = useCallback(() => {
+    if (circleRef.current) {
+      setRadiusMeters(circleRef.current.getRadius());
+    }
+  }, []);
+
+  const onCenterChanged = useCallback(() => {
+    if (circleRef.current) {
+      const newCenter = circleRef.current.getCenter();
+      if (newCenter) {
+        setMapCenter({
+          lat: newCenter.lat(),
+          lng: newCenter.lng()
+        });
+      }
+    }
+  }, []);
+
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100 overflow-hidden relative selection:bg-indigo-500/30">
+    <main className="min-h-screen bg-slate-950 text-slate-100 overflow-hidden relative selection:bg-indigo-500/30 pb-24">
       <div className="absolute top-0 left-0 w-full h-full overflow-hidden -z-10">
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-indigo-600/20 blur-[120px]" />
         <div className="absolute top-[20%] right-[-10%] w-[30%] h-[50%] rounded-full bg-cyan-600/10 blur-[150px]" />
         <div className="absolute bottom-[-20%] left-[20%] w-[50%] h-[40%] rounded-full bg-fuchsia-600/10 blur-[150px]" />
       </div>
 
-      <div className="max-w-7xl mx-auto px-6 py-16 lg:py-24">
-        {/* Header Section */}
+      <div className="max-w-7xl mx-auto px-6 py-16 lg:py-16">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6 }}
-          className="text-center mb-16"
+          className="text-center mb-12"
         >
           <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full glass mb-6 text-sm text-indigo-300 font-medium">
             <Globe className="w-4 h-4" /> AI-Powered Lead Generation
           </div>
-          <h1 className="text-5xl lg:text-7xl font-bold mb-6 tracking-tight bg-gradient-to-br from-white via-slate-200 to-slate-500 text-transparent bg-clip-text">
-            Find Your Next <br /> <span className="text-indigo-400">Perfect Client</span>
+          <h1 className="text-4xl lg:text-6xl font-bold mb-4 tracking-tight bg-gradient-to-br from-white via-slate-200 to-slate-500 text-transparent bg-clip-text">
+            Find Your Next <span className="text-indigo-400">Perfect Client</span>
           </h1>
           <p className="text-lg text-slate-400 max-w-2xl mx-auto">
-            Discover local businesses near you and instantly analyze their digital presence to identify high-value prospects.
+            Drag the circle to define your search area and discover local businesses ready for a digital upgrade.
           </p>
         </motion.div>
 
-        {/* Search Controls */}
+        {/* Map Search Control */}
         <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.6, delay: 0.2 }}
-          className="max-w-2xl mx-auto"
+          className="max-w-4xl mx-auto mb-16"
         >
-          <div className="glass rounded-2xl p-4 sm:p-6 shadow-2xl shadow-indigo-500/10 border border-white/5 flex flex-col sm:flex-row gap-4 items-end">
-            <div className="flex-1 w-full">
-              <label className="block text-sm font-medium text-slate-400 mb-2">Search Radius (miles)</label>
-              <div className="relative">
-                <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 w-5 h-5" />
-                <input
-                  type="number"
-                  value={radius}
-                  onChange={(e) => setRadius(e.target.value)}
-                  className="w-full bg-slate-900/50 border border-slate-700/50 rounded-xl py-3 pl-12 pr-4 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-medium"
-                  placeholder="e.g. 10"
-                />
-              </div>
+          <div className="glass rounded-3xl p-4 shadow-2xl border border-white/5">
+            <div className="w-full h-[350px] sm:h-[450px] relative rounded-2xl overflow-hidden mb-4 bg-slate-900 flex items-center justify-center">
+              {!isLoaded ? (
+                <div className="flex flex-col items-center text-slate-400">
+                  <Loader2 className="w-8 h-8 animate-spin mb-4 text-indigo-500" />
+                  Loading Interactive Map...
+                </div>
+              ) : (
+                <GoogleMap
+                  mapContainerStyle={mapContainerStyle}
+                  center={mapCenter}
+                  zoom={12}
+                  options={{
+                    disableDefaultUI: true,
+                    zoomControl: true,
+                    styles: [
+                      { elementType: "geometry", stylers: [{ color: "#242f3e" }] },
+                      { elementType: "labels.text.stroke", stylers: [{ color: "#242f3e" }] },
+                      { elementType: "labels.text.fill", stylers: [{ color: "#746855" }] },
+                      {
+                        featureType: "administrative.locality",
+                        elementType: "labels.text.fill",
+                        stylers: [{ color: "#d59563" }],
+                      },
+                      {
+                        featureType: "poi",
+                        elementType: "labels.text.fill",
+                        stylers: [{ color: "#d59563" }],
+                      },
+                      {
+                        featureType: "poi.park",
+                        elementType: "geometry",
+                        stylers: [{ color: "#263c3f" }],
+                      },
+                      {
+                        featureType: "poi.park",
+                        elementType: "labels.text.fill",
+                        stylers: [{ color: "#6b9a76" }],
+                      },
+                      {
+                        featureType: "road",
+                        elementType: "geometry",
+                        stylers: [{ color: "#38414e" }],
+                      },
+                      {
+                        featureType: "road",
+                        elementType: "geometry.stroke",
+                        stylers: [{ color: "#212a37" }],
+                      },
+                      {
+                        featureType: "road",
+                        elementType: "labels.text.fill",
+                        stylers: [{ color: "#9ca5b3" }],
+                      },
+                      {
+                        featureType: "water",
+                        elementType: "geometry",
+                        stylers: [{ color: "#17263c" }],
+                      },
+                      {
+                        featureType: "water",
+                        elementType: "labels.text.fill",
+                        stylers: [{ color: "#515c6d" }],
+                      },
+                      {
+                        featureType: "water",
+                        elementType: "labels.text.stroke",
+                        stylers: [{ color: "#17263c" }],
+                      },
+                    ]
+                  }}
+                >
+                  <Marker position={mapCenter} />
+                  <Circle
+                    center={mapCenter}
+                    radius={radiusMeters}
+                    options={{
+                      fillColor: '#6366f1',
+                      fillOpacity: 0.2,
+                      strokeColor: '#6366f1',
+                      strokeOpacity: 0.8,
+                      strokeWeight: 2,
+                      editable: true,
+                      draggable: true,
+                    }}
+                    onLoad={(circle) => { circleRef.current = circle; }}
+                    onRadiusChanged={onRadiusChanged}
+                    onCenterChanged={onCenterChanged}
+                  />
+                </GoogleMap>
+              )}
             </div>
 
-            <button
-              onClick={() => fetchBusinesses()}
-              disabled={loading}
-              className="w-full sm:w-auto bg-indigo-500 hover:bg-indigo-400 text-white font-medium py-3 px-8 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed group"
-            >
-              {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Search className="w-5 h-5 group-hover:scale-110 transition-transform" />}
-              {loading ? 'Scanning Area...' : 'Find Prospects'}
-            </button>
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 px-2">
+              <div className="text-slate-400 text-sm flex items-center gap-2">
+                <MapPin className="w-4 h-4 text-indigo-400" />
+                Search Area: <span className="text-white font-medium">~{Math.round(radiusMeters / 1609.34)} miles</span>
+              </div>
+              <button
+                onClick={() => fetchBusinesses()}
+                disabled={loading || !isLoaded}
+                className="w-full sm:w-auto bg-indigo-500 hover:bg-indigo-400 text-white font-medium py-3 px-8 rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed group"
+              >
+                {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Search className="w-5 h-5 group-hover:scale-110 transition-transform" />}
+                {loading ? 'Scanning Area...' : 'Scan For Prospects'}
+              </button>
+            </div>
           </div>
 
           {error && (
             <div className="mt-4 p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-sm flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4" /> {error}
+              <AlertTriangle className="w-4 h-4 flex-shrink-0" /> {error}
             </div>
           )}
           {notice && (
@@ -269,8 +381,7 @@ export default function Home() {
               initial={{ opacity: 0, y: 40 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -20 }}
-              transition={{ duration: 0.5, delay: 0.3 }}
-              className="mt-16"
+              className="mt-8"
             >
               <div className="flex items-center justify-between mb-4 px-2">
                 <h3 className="text-xl font-semibold">Local Prospects Found: {allBusinesses.length}{nextPageToken && '+'}</h3>
@@ -353,8 +464,8 @@ export default function Home() {
                                 <div className="space-y-3">
                                   <div className="flex items-center gap-3">
                                     <div className={`px-3 py-1 rounded-full text-xs font-semibold ${biz.analysis.category === 'Modern' ? 'bg-emerald-500/10 text-emerald-400' :
-                                      biz.analysis.category === 'Average' ? 'bg-blue-500/10 text-blue-400' :
-                                        'bg-amber-500/10 text-amber-400'
+                                        biz.analysis.category === 'Average' ? 'bg-blue-500/10 text-blue-400' :
+                                          'bg-amber-500/10 text-amber-400'
                                       }`}>
                                       {biz.analysis.category}
                                     </div>
