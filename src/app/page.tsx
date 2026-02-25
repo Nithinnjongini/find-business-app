@@ -45,6 +45,7 @@ export default function Home() {
   const [mapCenter, setMapCenter] = useState(defaultCenter);
   const [radiusMeters, setRadiusMeters] = useState(8046); // ~5 miles in meters
   const circleRef = useRef<any>(null);
+  const mapRef = useRef<any>(null);
 
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -63,14 +64,19 @@ export default function Home() {
   const totalPages = Math.ceil(allBusinesses.length / ITEMS_PER_PAGE) + (nextPageToken ? 1 : 0);
 
   // Initialize Map Center from Browser Geolocation
-  useEffect(() => {
+  const jumpToCurrentLocation = useCallback(() => {
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (position) => {
-          setMapCenter({
+          const newCenter = {
             lat: position.coords.latitude,
             lng: position.coords.longitude
-          });
+          };
+          setMapCenter(newCenter);
+          if (mapRef.current) {
+            mapRef.current.panTo(newCenter);
+            mapRef.current.setZoom(12);
+          }
         },
         () => {
           console.warn("Location access denied or unavailable.");
@@ -78,6 +84,10 @@ export default function Home() {
       );
     }
   }, []);
+
+  useEffect(() => {
+    jumpToCurrentLocation();
+  }, [jumpToCurrentLocation]);
 
   useEffect(() => {
     if (displayedBusinesses.length === 0) return;
@@ -286,6 +296,7 @@ export default function Home() {
                   mapContainerStyle={mapContainerStyle}
                   center={mapCenter}
                   zoom={12}
+                  onLoad={(map) => { mapRef.current = map; }}
                   options={{
                     disableDefaultUI: true,
                     zoomControl: true,
@@ -368,10 +379,19 @@ export default function Home() {
             </div>
 
             <div className="flex flex-col sm:flex-row items-center justify-between gap-4 px-2">
-              <div className="text-slate-400 text-sm flex items-center gap-2">
-                <MapPin className="w-4 h-4 text-indigo-400" />
-                Search Area: <span className="text-white font-medium">~{Math.round(radiusMeters / 1609.34)} miles</span>
+              <div className="flex flex-col gap-1">
+                <div className="text-slate-400 text-sm flex items-center gap-2">
+                  <MapPin className="w-4 h-4 text-indigo-400" />
+                  Search Area: <span className="text-white font-medium break-all">{Math.round((radiusMeters / 1609.34) * 10) / 10} miles</span>
+                </div>
+                <button
+                  onClick={jumpToCurrentLocation}
+                  className="text-xs text-indigo-400 hover:text-indigo-300 text-left transition-colors font-medium flex items-center gap-1"
+                >
+                  <MapPinIcon className="w-3 h-3" /> Jump to My Location
+                </button>
               </div>
+
               <button
                 onClick={() => fetchBusinesses()}
                 disabled={loading || !isLoaded}
