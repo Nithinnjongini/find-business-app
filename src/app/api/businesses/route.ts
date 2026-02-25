@@ -16,7 +16,9 @@ export async function GET(request: Request) {
   if (apiKey) {
     try {
       // Legacy Google Places API - Nearby Search
-      const searchUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radiusInMeters}&keyword=business&key=${apiKey}`;
+      // Using 'establishment' or specific types will yield better results than just 'business' keyword
+      // You can expand this or let the user choose categories. For now, we will use keyword=business but remove the severe slice.
+      const searchUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radiusInMeters}&type=establishment&keyword=local+business&key=${apiKey}`;
       const searchResponse = await fetch(searchUrl);
       const searchData = await searchResponse.json();
 
@@ -24,9 +26,9 @@ export async function GET(request: Request) {
         throw new Error(`Google API search responded with status: ${searchData.status}. Error: ${searchData.error_message || ''}`);
       }
 
-      // The legacy API requires a separate Place Details call to fetch the `website` and `formatted_phone_number` for each place.
-      // We will slice the results to 10 to limit concurrent API calls and respect rate limits.
-      const rawPlaces = (searchData.results || []).slice(0, 10);
+      // Google Places returns up to 20 results per page. We will process all 20 of them (rather than capping at 10)
+      // Note: fetching details for 20 places concurrently is generally fine for the API, but takes slightly longer.
+      const rawPlaces = searchData.results || [];
 
       const detailedPlacesPromises = rawPlaces.map(async (place: any) => {
         if (!place.place_id) return place;
@@ -51,7 +53,7 @@ export async function GET(request: Request) {
         address: place.formatted_address || place.vicinity || 'No Address Provided',
         phone: place.formatted_phone_number || place.international_phone_number || 'No Phone',
         website: place.website || null,
-        category: (place.types && place.types.length > 0) ? place.types[0] : 'Business',
+        category: (place.types && place.types.length > 0) ? place.types.filter((t: string) => t !== 'establishment' && t !== 'point_of_interest')[0] || place.types[0] : 'Business',
       }));
 
       return NextResponse.json({ businesses: formattedBusinesses });
