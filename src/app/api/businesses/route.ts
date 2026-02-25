@@ -15,52 +15,52 @@ export async function GET(request: Request) {
 
   if (apiKey) {
     try {
-      // Using Google Places API (New) Text Search
-      const url = `https://places.googleapis.com/v1/places:searchNearby`;
-      const requestBody = {
-        includedTypes: ['restaurant', 'plumber', 'electrician', 'hair_care', 'local_government_office', 'store', 'health'],
-        maxResultCount: 20,
-        locationRestriction: {
-          circle: {
-            center: {
-              latitude: parseFloat(lat),
-              longitude: parseFloat(lng),
-            },
-            radius: radiusInMeters,
-          }
-        }
-      };
+      // Legacy Google Places API - Nearby Search
+      const searchUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radiusInMeters}&keyword=business&key=${apiKey}`;
+      const searchResponse = await fetch(searchUrl);
+      const searchData = await searchResponse.json();
 
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Goog-Api-Key': apiKey,
-          'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.websiteUri,places.nationalPhoneNumber,places.primaryType',
-        },
-        body: JSON.stringify(requestBody),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Google API responded with ${response.status}`);
+      if (searchData.status !== 'OK' && searchData.status !== 'ZERO_RESULTS') {
+        throw new Error(`Google API search responded with status: ${searchData.status}. Error: ${searchData.error_message || ''}`);
       }
 
-      const data = await response.json();
-      
-      const formattedBusinesses = (data.places || []).map((place: any, idx: number) => ({
+      // The legacy API requires a separate Place Details call to fetch the `website` and `formatted_phone_number` for each place.
+      // We will slice the results to 10 to limit concurrent API calls and respect rate limits.
+      const rawPlaces = (searchData.results || []).slice(0, 10);
+
+      const detailedPlacesPromises = rawPlaces.map(async (place: any) => {
+        if (!place.place_id) return place;
+        try {
+          const detailsUrl = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${place.place_id}&fields=name,formatted_address,website,formatted_phone_number,types&key=${apiKey}`;
+          const detailsRes = await fetch(detailsUrl);
+          const detailsData = await detailsRes.json();
+          if (detailsData.status === 'OK') {
+            return { ...place, ...detailsData.result }; // Merge details into place
+          }
+          return place;
+        } catch (err) {
+          return place;
+        }
+      });
+
+      const detailedPlaces = await Promise.all(detailedPlacesPromises);
+
+      const formattedBusinesses = detailedPlaces.map((place: any, idx: number) => ({
         id: `google-${idx}`,
-        name: place.displayName?.text || 'Unknown Business',
-        address: place.formattedAddress || 'No Address Provided',
-        phone: place.nationalPhoneNumber || 'No Phone',
-        website: place.websiteUri || null,
-        category: place.primaryType || 'Business',
+        name: place.name || 'Unknown Business',
+        address: place.formatted_address || place.vicinity || 'No Address Provided',
+        phone: place.formatted_phone_number || place.international_phone_number || 'No Phone',
+        website: place.website || null,
+        category: (place.types && place.types.length > 0) ? place.types[0] : 'Business',
       }));
 
       return NextResponse.json({ businesses: formattedBusinesses });
 
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error fetching places:', error);
-      return NextResponse.json({ error: 'Failed to fetch external businesses' }, { status: 500 });
+      return NextResponse.json({
+        error: error.message || 'Failed to fetch external businesses from Google API'
+      }, { status: 400 });
     }
   }
 
@@ -92,8 +92,8 @@ export async function GET(request: Request) {
     }
   ];
 
-  return NextResponse.json({ 
-    businesses: mockBusinesses, 
-    _notice: "Running in mock mode. Add GOOGLE_PLACES_API_KEY to .env to fetch real data." 
+  return NextResponse.json({
+    businesses: mockBusinesses,
+    _notice: "Running in mock mode. Add GOOGLE_PLACES_API_KEY to .env to fetch real data."
   });
 }
